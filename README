@@ -1,0 +1,216 @@
+# RRB NTPC Question Bank Automation Pipeline
+
+## Architecture
+
+```
+Claude OCR (manual)
+        ↓
+questions_raw.txt  (pipe-separated, 100 questions)
+        ↓
+[pipeline.py] — runs 10 batches of 10 questions
+        ↓
+Step 1: Qwen3:14b  → Reasoning, Calculation, Evaluation, KaTeX correction
+        ↓
+Step 2: Gemma3:12b → Validation, UNCERTAIN resolution, Answer-Explanation check
+        ↓
+Step 3: python-docx → Word Document (table, formatted)
+        ↓
+Step 4: openpyxl   → Excel (admin-panel import format, UNCERTAIN sheet)
+```
+
+---
+
+## VS Code Setup
+
+### Recommended Extensions
+
+Install these in VS Code (`Ctrl+Shift+X`):
+
+| Extension | ID | Purpose |
+|---|---|---|
+| Python | `ms-python.python` | Core Python support |
+| Pylance | `ms-python.vscode-pylance` | Type checking, IntelliSense |
+| Python Debugger | `ms-python.debugpy` | Breakpoints, step-through |
+| Ruff | `charliermarsh.ruff` | Fast linter + formatter |
+| KaTeX Math | `mathematic.vscode-latex` | Preview KaTeX in .md files |
+| Excel Viewer | `grapecity.gc-excelviewer` | Preview .xlsx inline |
+| Word Document Viewer | `cispelementor.word-document-view` | Preview .docx inline |
+| GitLens | `eamodio.gitlens` | Git history |
+| indent-rainbow | `oderwat.indent-rainbow` | Indent visibility |
+| Error Lens | `usernamehako.vscode-inline-error-lens` | Inline errors |
+
+### Workspace Settings (.vscode/settings.json)
+
+```json
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "charliermarsh.ruff",
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python",
+  "python.analysis.typeCheckingMode": "basic",
+  "files.encoding": "utf8",
+  "editor.tabSize": 4,
+  "editor.rulers": [100],
+  "[python]": {
+    "editor.formatOnSave": true
+  }
+}
+```
+
+### Launch Config (.vscode/launch.json)
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Full Pipeline",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Test DOCX + XLSX only",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/test_pipeline.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
+```
+
+---
+
+## Prerequisites & Installation
+
+### 1. Python 3.11+
+```
+https://www.python.org/downloads/
+```
+✅ Check "Add Python to PATH" during install.
+
+### 2. Create Virtual Environment
+```bash
+cd rrb_pipeline
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # macOS/Linux
+```
+
+### 3. Install Python Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Ollama (Local LLM Runtime)
+```
+https://ollama.com/download
+```
+After install:
+```bash
+ollama pull qwen3:14b       # ~9 GB — reasoning model
+ollama pull gemma3:12b      # ~8 GB — validation model
+ollama serve                # starts API on localhost:11434
+```
+
+> ⚠️ RAM Note: qwen3:14b ~9GB + gemma3:12b ~8GB = 17GB.
+> On 16GB RAM, run one model at a time.
+> Pipeline already handles this — Step 1 finishes before Step 2 starts.
+> If still hitting RAM limits → switch validation model to `gemma3:4b` (4GB).
+
+### 5. Node.js (optional – only if using docx npm for advanced DOCX)
+```
+https://nodejs.org/en/download
+npm install -g docx
+```
+The pipeline uses `python-docx` by default (no Node needed).
+
+---
+
+## Folder Structure
+
+```
+rrb_pipeline/
+├── pipeline.py              ← Main orchestrator
+├── test_pipeline.py         ← Test DOCX/XLSX without Ollama
+├── requirements.txt
+├── input/
+│   └── questions_raw.txt    ← Paste Claude OCR output here
+├── output/
+│   ├── step1_batch01.txt    ← Intermediate (Qwen3 output)
+│   ├── step2_batch01.txt    ← Intermediate (Gemma3 output)
+│   ├── final_pipe.txt       ← Combined final pipe text
+│   ├── RRB_NTPC_Questions.docx
+│   └── RRB_NTPC_Questions.xlsx
+├── logs/
+│   └── pipeline_YYYYMMDD.log
+└── scripts/
+    ├── __init__.py
+    ├── utils.py             ← Shared helpers
+    ├── step1_reasoning.py   ← Qwen3:14b integration
+    ├── step2_validation.py  ← Gemma3:12b integration
+    ├── step3_docx.py        ← Word document generation
+    └── step4_xlsx.py        ← Excel generation
+```
+
+---
+
+## Usage
+
+### Step A — Claude OCR (manual)
+1. Upload question paper images/PDF to Claude.
+2. Ask Claude to output in pipe format:
+   ```
+   No|Section|Sub-Section|Question|Option1|Option2|Option3|Option4|Correct Answer|Explanation|Difficulty
+   1|Mathematics|...|...|...|...|...|...|...|...|Medium
+   ```
+3. Paste 100 questions into `input/questions_raw.txt`.
+
+### Step B — Run Pipeline
+```bash
+cd rrb_pipeline
+.venv\Scripts\activate
+ollama serve           # in a separate terminal
+python pipeline.py
+```
+
+### Step C — Check Output
+- `output/RRB_NTPC_Questions.xlsx` → Import to admin panel
+- `output/RRB_NTPC_Questions.docx` → Review formatted table
+- `output/final_pipe.txt` → Raw pipe data
+- Check `UNCERTAIN_Review` sheet in Excel for any flagged questions
+
+---
+
+## Pipe Format (11 Columns)
+
+```
+No | Section | Sub-Section | Question | Option1 | Option2 | Option3 | Option4 | Correct Answer | Explanation | Difficulty
+```
+
+- **Correct Answer**: Exact text matching one of the 4 options, or `UNCERTAIN`
+- **Explanation**: Hindi, concise, KaTeX for math
+- **Difficulty**: `Easy` / `Medium` / `Hard`
+- **KaTeX**: All numbers/symbols/% wrapped in `$...$` — e.g. `$25\%$`, `$\frac{1}{2}$`
+
+---
+
+## Model Recommendations
+
+| Role | Model | RAM | Why |
+|---|---|---|---|
+| Reasoning / Calculation | `qwen3:14b` | ~9GB | Best math + Hindi explanation on CPU |
+| Validation | `gemma3:12b` | ~8GB | Strong factual accuracy, logic check |
+| Validation (low RAM) | `gemma3:4b` | ~3GB | Lighter alternative if 12b causes OOM |
+
+---
+
+## Customisation
+
+- **Batch size**: Change `BATCH_SIZE` in `pipeline.py` (default: 10)
+- **Models**: Change `REASONING_MODEL` / `VALIDATION_MODEL` in `pipeline.py`
+- **Excel colors**: Edit `HEADER_FILL`, `ALT_FILL` in `step4_xlsx.py`
+- **Column widths**: Edit `COL_WIDTHS` in `step4_xlsx.py` / `COL_WIDTHS_CM` in `step3_docx.py`
