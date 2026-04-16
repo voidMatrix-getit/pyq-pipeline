@@ -1,213 +1,173 @@
-"""
-dashboard.py  —  Live terminal status dashboard for the pipeline.
-Shows batch progress, UNCERTAIN counts, model status, output file sizes.
-Run: python dashboard.py          (auto-refreshes every 5s)
-     python dashboard.py --once   (print once and exit)
-"""
-
-import json
+import streamlit as st
 import os
-import sys
-import time
-import argparse
-from pathlib import Path
-from datetime import datetime
+import subprocess
+import requests
+import pandas as pd
+from pdf2image import convert_from_bytes
+from paddleocr import PaddleOCR
 
-STATE_FILE  = Path("output/.pipeline_state.json")
-OUTPUT_DIR  = Path("output")
-INPUT_FILE  = Path("input/questions_raw.txt")
-BATCH_SIZE  = 10
+# Initialize PaddleOCR
+@st.cache_resource
+def load_ocr():
+    return PaddleOCR(use_angle_cls=True, lang='en')
 
-# ANSI colors
-R   = "\033[91m"   # red
-G   = "\033[92m"   # green
-Y   = "\033[93m"   # yellow
-B   = "\033[94m"   # blue
-C   = "\033[96m"   # cyan
-W   = "\033[97m"   # white bold
-DIM = "\033[2m"
-RST = "\033[0m"
-CLS = "\033[2J\033[H"
+ocr = load_ocr()
 
+st.set_page_config(page_title="PYQ Pipeline", page_icon="📄", layout="wide")
 
-def file_size(path: Path) -> str:
-    if path.exists():
-        sz = path.stat().st_size
-        if sz > 1_000_000:
-            return f"{sz/1_000_000:.1f} MB"
-        return f"{sz/1_000:.0f} KB"
-    return "—"
+# Define paths
+INPUT_DIR = "input"
+OUTPUT_DIR = "output"
+RAW_FILE = os.path.join(INPUT_DIR, "questions_raw.txt")
+EXCEL_FILE = os.path.join(OUTPUT_DIR, "RRB_NTPC_Questions.xlsx")
+WORD_FILE = os.path.join(OUTPUT_DIR, "RRB_NTPC_Questions.docx")
 
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def count_uncertain(path: Path) -> int:
-    if not path.exists():
-        return 0
+def structure_with_llm(raw_text):
+    """Sends raw text to Ollama to format into pipe-separated structure."""
+    prompt = f"""
+    You are an expert data extraction assistant. Format this raw OCR text EXACTLY into this pipe-separated structure:
+    No|Section|Sub-Section|Question|Option1|Option2|Option3|Option4|Correct Answer|Explanation|Difficulty
+    
+    Rules:
+    1. Output ONLY the pipe-separated rows. No header, no markdown, no introductions.
+    2. Maintain the exact 11 columns. Leave missing fields blank (e.g., ||).
+    
+    Raw OCR Text:
+    {raw_text}
+    """
     try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines()
-                   if "UNCERTAIN" in line.upper())
-    except Exception:
-        return 0
+        response = requests.post('http://localhost:11434/api/generate', json={
+            "model": "qwen3:14b", 
+            "prompt": prompt,
+            "stream": False
+        })
+        if response.status_code == 200:
+            return response.json()['response'].strip()
+        return f"Error: Status {response.status_code}"
+    except Exception as e:
+        return f"Error: {str(e)}"
 
+# --- UI Layout ---
 
-def ollama_status() -> tuple[bool, list[str]]:
-    """Check if Ollama is running and which models are available."""
+st.title("📄 PYQ Automated Extraction")
+st.markdown("Transform raw exam PDFs or text into structured DataFrames and Word documents using local LLMs.")
+
+# Sidebar Controls
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    mode = st.radio("Pipeline Mode", ["Auto (PDF Upload)", "Manual (Text Input)"])
+    st.markdown("---")
+    st.info("Ensure Ollama (`qwen3:14b` & `gemma3:12b`) is running locally on port 11434.")
+
+# Main Processing Area
+if mode == "Auto (PDF Upload)":
+    uploaded_file = st.file_uploader("Upload Question Paper (PDF)", type=["pdf"])
+    
+    if uploaded_file and st.button("🚀 Start Full Automation", type="primary"):
+        
+        # 1. OCR Stage
+        with st.spinner("📸 Extracting text from PDF via PaddleOCR..."):
+            images = convert_from_bytes(uploaded_file.read())
+            raw_extracted_text = ""
+            for i, img in enumerate(images):
+                img_path = f"temp_page_{i}.jpg"
+                img.save(img_path, "JPEG")
+                result = ocr.ocr(img_path, cls=True)
+                for res in result:
+                    if res:
+                        for line in res:
+                            raw_extracted_text += line[1][0] + "\n"
+                os.remove(img_path)
+        st.success(f"Successfully scanned {len(images)} pages.")
+
+        # 2. Structuring Stage
+        with st.spinner("🧠 Structuring data with Qwen3:14b..."):
+            structured_text = structure_with_llm(raw_extracted_text)
+            
+        if "Error" in structured_text:
+            st.error(structured_text)
+        else:
+            with open(RAW_FILE, "w", encoding="utf-8") as f:
+                f.write(structured_text)
+            st.success("Data formatted successfully!")
+            
+            # Show a quick preview of the extracted data
+            with st.expander("Preview Extracted Pipe Data"):
+                st.text(structured_text[:500] + "\n...[truncated]")
+
+            # 3. Pipeline Execution Stage
+            with st.spinner("⚙️ Running Reasoning & Validation Pipeline... This may take a few minutes."):
+                # We run it quietly in the background, no messy terminal logs
+                subprocess.run(["python", "pipeline.py"], capture_output=True, text=True)
+            
+            st.toast("Pipeline execution complete!", icon="✅")
+
+elif mode == "Manual (Text Input)":
+    manual_text = st.text_area("Paste Pipe-Separated Text Here", height=250, 
+                               placeholder="1|Math|Algebra|What is x...|A|B|C|D|A|Explanation|Medium")
+    
+    if st.button("🚀 Run Pipeline", type="primary"):
+        if manual_text.strip():
+            with open(RAW_FILE, "w", encoding="utf-8") as f:
+                f.write(manual_text)
+                
+            with st.spinner("⚙️ Running Reasoning & Validation Pipeline..."):
+                subprocess.run(["python", "pipeline.py"], capture_output=True, text=True)
+            st.toast("Pipeline execution complete!", icon="✅")
+        else:
+            st.warning("Please paste some text first.")
+
+# --- Results UI Layer ---
+st.markdown("---")
+st.header("📊 Extraction Results")
+
+# Check if outputs exist to display the final UI
+if os.path.exists(EXCEL_FILE) and os.path.exists(WORD_FILE):
+    
+    # Load into an interactive dataframe
     try:
-        import requests
-        r = requests.get("http://localhost:11434/api/tags", timeout=2)
-        if r.status_code == 200:
-            models = [m["name"] for m in r.json().get("models", [])]
-            return True, models
-    except Exception:
-        pass
-    return False, []
-
-
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {"batches": {}}
-
-
-def total_questions() -> int:
-    try:
-        lines = [l for l in INPUT_FILE.read_text(encoding="utf-8").splitlines()
-                 if l.strip() and not l.lower().startswith("no|")]
-        return len(lines)
-    except Exception:
-        return 0
-
-
-def render(once: bool = False):
-    state       = load_state()
-    total_q     = total_questions()
-    num_batches = (total_q + BATCH_SIZE - 1) // BATCH_SIZE if total_q else 10
-    batches     = state.get("batches", {})
-
-    done_s1 = sum(1 for b in batches.values()
-                  if b.get("step1", {}).get("status") == "done")
-    done_s2 = sum(1 for b in batches.values()
-                  if b.get("step2", {}).get("status") == "done")
-    fail_s1 = sum(1 for b in batches.values()
-                  if b.get("step1", {}).get("status") == "failed")
-    fail_s2 = sum(1 for b in batches.values()
-                  if b.get("step2", {}).get("status") == "failed")
-
-    final_pipe = OUTPUT_DIR / "final_pipe.txt"
-    docx_path  = OUTPUT_DIR / "RRB_NTPC_Questions.docx"
-    xlsx_path  = OUTPUT_DIR / "RRB_NTPC_Questions.xlsx"
-    uncertain  = count_uncertain(final_pipe)
-
-    ollama_up, models = ollama_status()
-
-    bar_width = 30
-
-    def bar(done, total, color=G):
-        filled = int(bar_width * done / total) if total else 0
-        b = color + "█" * filled + DIM + "░" * (bar_width - filled) + RST
-        return b
-
-    def status_dot(s):
-        if s == "done":   return G + "●" + RST
-        if s == "failed": return R + "●" + RST
-        return Y + "○" + RST
-
-    now = datetime.now().strftime("%H:%M:%S")
-
-    out = []
-    out.append(f"{W}{'─'*62}{RST}")
-    out.append(f"  {C}RRB NTPC Pipeline Dashboard{RST}  {DIM}{now}{RST}")
-    out.append(f"{W}{'─'*62}{RST}")
-
-    # Ollama status
-    ollama_str = (G + "● Running" + RST) if ollama_up else (R + "● Offline" + RST)
-    model_str  = "  " + ", ".join(models[:4]) if models else "  no models loaded"
-    out.append(f"  Ollama : {ollama_str}")
-    out.append(f"  Models :{DIM}{model_str}{RST}")
-
-    out.append(f"  Questions in input : {W}{total_q}{RST}")
-    out.append("")
-
-    # Step 1
-    pct1 = int(100 * done_s1 / num_batches) if num_batches else 0
-    out.append(f"  Step 1  Reasoning   {bar(done_s1, num_batches)}  "
-               f"{W}{done_s1:2d}/{num_batches}{RST} batches  {pct1}%"
-               + (f"  {R}{fail_s1} failed{RST}" if fail_s1 else ""))
-
-    # Step 2
-    pct2 = int(100 * done_s2 / num_batches) if num_batches else 0
-    out.append(f"  Step 2  Validation  {bar(done_s2, num_batches)}  "
-               f"{W}{done_s2:2d}/{num_batches}{RST} batches  {pct2}%"
-               + (f"  {R}{fail_s2} failed{RST}" if fail_s2 else ""))
-
-    out.append("")
-    out.append(f"  {'Batch':>6}  {'Step1':>10}  {'Step2':>10}  {'Timestamp':>20}")
-    out.append(f"  {'─'*6}  {'─'*10}  {'─'*10}  {'─'*20}")
-
-    for i in range(1, num_batches + 1):
-        b   = batches.get(str(i), {})
-        s1  = b.get("step1", {})
-        s2  = b.get("step2", {})
-        ts  = s2.get("timestamp", s1.get("timestamp", ""))[:19] or "—"
-        row = (f"  {i:>6}  "
-               f"{status_dot(s1.get('status','pending'))} {s1.get('status','pending'):>8}  "
-               f"{status_dot(s2.get('status','pending'))} {s2.get('status','pending'):>8}  "
-               f"{DIM}{ts}{RST}")
-        out.append(row)
-
-    out.append("")
-    out.append(f"  {'─'*58}")
-    out.append(f"  Output Files")
-    out.append(f"  {'─'*58}")
-
-    def fline(label, path):
-        exists = path.exists()
-        color  = G if exists else DIM
-        sz     = file_size(path)
-        unc    = ""
-        if exists and path.suffix == ".txt":
-            unc_c = count_uncertain(path)
-            unc   = f"  {R}⚠ {unc_c} UNCERTAIN{RST}" if unc_c else f"  {G}✓ clean{RST}"
-        return f"  {color}{label:<28}{RST}  {sz:<10}{unc}"
-
-    out.append(fline("final_pipe.txt",            final_pipe))
-    out.append(fline("RRB_NTPC_Questions.docx",   docx_path))
-    out.append(fline("RRB_NTPC_Questions.xlsx",   xlsx_path))
-
-    if uncertain:
-        out.append("")
-        out.append(f"  {R}⚠  {uncertain} UNCERTAIN answer(s) in final output{RST}")
-        out.append(f"  {DIM}→ Check UNCERTAIN_Review sheet in Excel{RST}")
-
-    # Overall done
-    if done_s2 == num_batches and docx_path.exists() and xlsx_path.exists():
-        out.append("")
-        out.append(f"  {G}✅  Pipeline complete!{RST}")
-
-    out.append(f"{W}{'─'*62}{RST}")
-    if not once:
-        out.append(f"  {DIM}Auto-refreshing every 5s  •  Ctrl+C to exit{RST}")
-
-    print(CLS + "\n".join(out))
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
-
-    if args.once:
-        render(once=True)
-        return
-
-    try:
-        while True:
-            render()
-            time.sleep(5)
-    except KeyboardInterrupt:
-        print("\nDashboard closed.")
-
-if __name__ == "__main__":
-    main()
+        df = pd.read_excel(EXCEL_FILE)
+        
+        # Top Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Questions", len(df))
+        if 'Difficulty' in df.columns:
+            hard_count = len(df[df['Difficulty'].astype(str).str.contains('Hard', case=False, na=False)])
+            col2.metric("Hard Questions", hard_count)
+        if 'Correct Answer' in df.columns:
+            uncertain = len(df[df['Correct Answer'].astype(str).str.contains('UNCERTAIN', case=False, na=False)])
+            col3.metric("Flags (Uncertain)", uncertain, delta_color="inverse")
+            
+        # Interactive Table
+        st.subheader("Data Preview")
+        st.dataframe(df, use_container_width=True, height=300)
+        
+        # Download Buttons side-by-side
+        st.subheader("Download Artifacts")
+        btn_col1, btn_col2 = st.columns(2)
+        
+        with open(EXCEL_FILE, "rb") as file:
+            btn_col1.download_button(
+                label="📥 Download Excel (.xlsx)",
+                data=file,
+                file_name="RRB_NTPC_Questions.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            
+        with open(WORD_FILE, "rb") as file:
+            btn_col2.download_button(
+                label="📥 Download Word (.docx)",
+                data=file,
+                file_name="RRB_NTPC_Questions.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True
+            )
+            
+    except Exception as e:
+        st.info("Output files generated, but could not load the preview. (Is the Excel file corrupted?)")
+else:
+    st.info("Results will appear here once the pipeline finishes processing.")
