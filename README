@@ -1,3 +1,118 @@
+# PYQ Extraction Pipeline Architecture & Usage Guide
+
+This system automates the extraction of Previous Year Questions (PYQs) from raw PDF exam papers into structured Excel (`.xlsx`) and Word (`.docx`) formats. It uses PaddleOCR for vision extraction and local LLMs (via Ollama) for formatting, reasoning, and validation, all wrapped in a clean, interactive Streamlit web UI.
+
+---
+
+## 🏗️ Architecture Flow
+
+The system provides two modes of operation via the Streamlit dashboard:
+
+### 1. Auto Mode (Full PDF Automation)
+1. **Upload**: User uploads a `.pdf` file via the Streamlit UI.
+2. **Conversion**: `pdf2image` converts the PDF into temporary images.
+3. **Vision Extraction**: `PaddleOCR` scans the images to extract raw text blocks.
+4. **Data Structuring**: The raw text is sent to a local LLM (`qwen3:14b`) to format it into an exact 11-column pipe-separated string.
+5. **Core Processing (`pipeline.py`)**: 
+   - **Reasoning**: `qwen3:14b` evaluates questions, calculates answers, and formats math using KaTeX.
+   - **Validation**: `gemma3:12b` double-checks facts and resolves uncertainties.
+6. **Export & UI Display**: Data is saved to `output/`, and Streamlit displays an interactive preview and download buttons.
+
+### 2. Manual Mode (Text Input)
+Allows users to bypass OCR and paste pre-extracted, pipe-separated text directly.
+1. **Input**: Paste pipe-separated text into the Streamlit text area.
+2. **Core Processing**: The text undergoes the same Reasoning and Validation steps as Auto Mode.
+3. **Export**: Final `.docx` and `.xlsx` files are generated and ready for download.
+
+---
+
+## 💻 Technical Stack
+* **Frontend UI**: Streamlit
+* **Data Processing**: Pandas
+* **PDF Handling**: pdf2image (Requires Poppler)
+* **OCR**: PaddleOCR / PaddlePaddle
+* **LLM Engine**: Ollama (Running locally)
+* **Reasoning Model**: `qwen3:14b`
+* **Validation Model**: `gemma3:12b`
+* **Document Generation**: python-docx, openpyxl
+
+---
+
+## 🛠️ Setup & Installation
+
+### 1. System Prerequisites
+You must have the following installed on your system:
+* **Python 3.11+**
+* **Ollama**: [Download here](https://ollama.com/download)
+* **Poppler**: Required by `pdf2image` to read PDFs.
+  * **Windows**: Download from [oschwartz10612/poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases/), extract to `C:\poppler`, and add `C:\poppler\Library\bin` to your system's PATH.
+  * **macOS**: `brew install poppler`
+  * **Linux (Ubuntu/Debian)**: `sudo apt-get install poppler-utils`
+
+### 2. Pull Local LLMs
+Make sure your Ollama models are downloaded and ready:
+```bash
+ollama pull qwen3:14b
+ollama pull gemma3:12b
+```
+
+### 3. Install Python Dependencies
+Create a virtual environment and install the required packages:
+```bash
+python -m venv .venv
+
+# Activate on Windows: 
+.venv\Scripts\activate
+
+# Activate on Mac/Linux: 
+source .venv/bin/activate
+
+pip install requests python-docx openpyxl pandas streamlit paddlepaddle paddleocr pdf2image
+```
+
+---
+
+## ⚙️ Enabling the Live Progress Bar
+
+To allow the Streamlit UI to display a live loading bar while `pipeline.py` is running, you must add a simple print statement to your batch processing loop inside `pipeline.py`.
+
+Find your loop in `pipeline.py` and ensure it outputs `PROGRESS:X/Y` (using `flush=True`), and `PROGRESS:COMPLETE` at the very end:
+
+```python
+# Example modification inside pipeline.py
+total_batches = len(batches)
+
+for i, batch in enumerate(batches):
+    # This print statement is caught by Streamlit to update the UI
+    print(f"PROGRESS:{i + 1}/{total_batches}", flush=True) 
+    
+    # ... your existing batch processing logic ...
+
+print("PROGRESS:COMPLETE", flush=True)
+```
+
+---
+
+## 🚀 How to Run the App
+
+1. **Start Ollama**
+   Open a terminal and ensure the Ollama API is running in the background:
+   ```bash
+   ollama serve
+   ```
+
+2. **Launch the Streamlit Dashboard**
+   Open a *new* terminal, ensure your virtual environment is active, and run:
+   ```bash
+   streamlit run dashboard.py
+   ```
+
+3. **Use the App**
+   * Streamlit will automatically open a tab in your web browser (usually at `http://localhost:8501`).
+   * Select your mode from the left sidebar.
+   * Upload your PDF (or paste your text).
+   * Click **Start Processing** and monitor the live progress bar!
+
 # RRB NTPC Question Bank Automation Pipeline
 
 ## Architecture
