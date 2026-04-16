@@ -50,12 +50,44 @@ def structure_with_llm(raw_text):
     except Exception as e:
         return f"Error: {str(e)}"
 
+def run_pipeline_with_progress():
+    """Runs pipeline.py and reads stdout to update a Streamlit progress bar."""
+    progress_text = "Running LLM Reasoning & Validation..."
+    my_bar = st.progress(0, text=progress_text)
+    
+    # Run pipeline and stream the output line by line
+    process = subprocess.Popen(
+        ["python", "pipeline.py"], 
+        stdout=subprocess.PIPE, 
+        stderr=subprocess.STDOUT, 
+        text=True,
+        bufsize=1
+    )
+    
+    for line in process.stdout:
+        line = line.strip()
+        # Look for the progress marker we added to pipeline.py
+        if line.startswith("PROGRESS:"):
+            data = line.split(":")[1]
+            if data == "COMPLETE":
+                my_bar.progress(100, text="Pipeline Complete!")
+            else:
+                try:
+                    current, total = map(int, data.split("/"))
+                    percent_complete = int((current / total) * 100)
+                    my_bar.progress(percent_complete, text=f"Processing batch {current} of {total}...")
+                except Exception:
+                    pass
+                    
+    process.wait()
+    if process.returncode != 0:
+        st.error("Pipeline encountered an error. Check terminal logs.")
+
 # --- UI Layout ---
 
 st.title("📄 PYQ Automated Extraction")
 st.markdown("Transform raw exam PDFs or text into structured DataFrames and Word documents using local LLMs.")
 
-# Sidebar Controls
 with st.sidebar:
     st.header("⚙️ Configuration")
     mode = st.radio("Pipeline Mode", ["Auto (PDF Upload)", "Manual (Text Input)"])
@@ -94,16 +126,12 @@ if mode == "Auto (PDF Upload)":
                 f.write(structured_text)
             st.success("Data formatted successfully!")
             
-            # Show a quick preview of the extracted data
             with st.expander("Preview Extracted Pipe Data"):
                 st.text(structured_text[:500] + "\n...[truncated]")
 
-            # 3. Pipeline Execution Stage
-            with st.spinner("⚙️ Running Reasoning & Validation Pipeline... This may take a few minutes."):
-                # We run it quietly in the background, no messy terminal logs
-                subprocess.run(["python", "pipeline.py"], capture_output=True, text=True)
-            
-            st.toast("Pipeline execution complete!", icon="✅")
+            # 3. Pipeline Execution Stage with LIVE PROGRESS
+            run_pipeline_with_progress()
+            st.toast("Processing finished!", icon="✅")
 
 elif mode == "Manual (Text Input)":
     manual_text = st.text_area("Paste Pipe-Separated Text Here", height=250, 
@@ -114,9 +142,9 @@ elif mode == "Manual (Text Input)":
             with open(RAW_FILE, "w", encoding="utf-8") as f:
                 f.write(manual_text)
                 
-            with st.spinner("⚙️ Running Reasoning & Validation Pipeline..."):
-                subprocess.run(["python", "pipeline.py"], capture_output=True, text=True)
-            st.toast("Pipeline execution complete!", icon="✅")
+            # LIVE PROGRESS
+            run_pipeline_with_progress()
+            st.toast("Processing finished!", icon="✅")
         else:
             st.warning("Please paste some text first.")
 
@@ -124,14 +152,10 @@ elif mode == "Manual (Text Input)":
 st.markdown("---")
 st.header("📊 Extraction Results")
 
-# Check if outputs exist to display the final UI
 if os.path.exists(EXCEL_FILE) and os.path.exists(WORD_FILE):
-    
-    # Load into an interactive dataframe
     try:
         df = pd.read_excel(EXCEL_FILE)
         
-        # Top Metrics
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Questions", len(df))
         if 'Difficulty' in df.columns:
@@ -141,31 +165,17 @@ if os.path.exists(EXCEL_FILE) and os.path.exists(WORD_FILE):
             uncertain = len(df[df['Correct Answer'].astype(str).str.contains('UNCERTAIN', case=False, na=False)])
             col3.metric("Flags (Uncertain)", uncertain, delta_color="inverse")
             
-        # Interactive Table
         st.subheader("Data Preview")
         st.dataframe(df, use_container_width=True, height=300)
         
-        # Download Buttons side-by-side
         st.subheader("Download Artifacts")
         btn_col1, btn_col2 = st.columns(2)
         
         with open(EXCEL_FILE, "rb") as file:
-            btn_col1.download_button(
-                label="📥 Download Excel (.xlsx)",
-                data=file,
-                file_name="RRB_NTPC_Questions.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            btn_col1.download_button("📥 Download Excel (.xlsx)", data=file, file_name="RRB_NTPC_Questions.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             
         with open(WORD_FILE, "rb") as file:
-            btn_col2.download_button(
-                label="📥 Download Word (.docx)",
-                data=file,
-                file_name="RRB_NTPC_Questions.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True
-            )
+            btn_col2.download_button("📥 Download Word (.docx)", data=file, file_name="RRB_NTPC_Questions.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
             
     except Exception as e:
         st.info("Output files generated, but could not load the preview. (Is the Excel file corrupted?)")
